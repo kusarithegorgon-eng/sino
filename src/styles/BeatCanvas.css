@@ -9,6 +9,16 @@
   transition: transform 160ms cubic-bezier(.2,.9,.2,1);
 }
 
+/* fullscreen */
+.beat-canvas-root:fullscreen, .beat-canvas-root.fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  z-index: 9999 !important;
+  border-radius: 0 !important;
+}
+
 .beat-canvas-root:hover {
   transform: translateY(-3px) scale(1.01);
 }
@@ -43,4 +53,14 @@
   font-size: 12px;
   opacity: 0.85;
   text-shadow: 0 6px 18px rgba(0,0,0,0.55);
+}
+
+/* neon accent helper */
+:root {
+  --accent-neon: #00FFD1;
+  --accent-pink: #ff2d95;
+}
+
+@media (max-width: 700px) {
+  .beat-canvas-root { height: 320px; }
 }

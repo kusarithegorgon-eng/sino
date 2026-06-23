@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import "./../styles/BeatCanvas.css";
+import "../styles/BeatCanvas.css";
 
 type BeatCanvasProps = {
   audioRef?: React.RefObject<HTMLAudioElement>;
@@ -11,6 +11,8 @@ type BeatCanvasProps = {
   particleIntensity?: number; // 0..1
   palette?: string[]; // array of CSS colors
   className?: string;
+  visualMode?: "nebula" | "bars" | "ring";
+  containerRef?: React.RefObject<HTMLDivElement>;
 };
 
 type Particle = {
@@ -41,6 +43,8 @@ export default function BeatCanvas({
     "#FF9FD6",
   ],
   className,
+  visualMode = "nebula",
+  containerRef,
 }: BeatCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -54,12 +58,15 @@ export default function BeatCanvas({
   const lastBeatRef = useRef<number>(0);
   const [isRunning, setIsRunning] = useState(false);
 
+  // adaptive performance
+  const deviceIsMobile = typeof navigator !== "undefined" && /Mobi|Android/i.test(navigator.userAgent);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
   // Setup audio context and analyser when audioRef becomes available or on user interaction
   useEffect(() => {
     if (!audioRef?.current) return;
 
     let audio = audioRef.current;
-    // create AudioContext on user gesture if not created (Chrome autoplay policy)
     const startAudio = async () => {
       if (!audioCtxRef.current) {
         const AC = window.AudioContext || (window as any).webkitAudioContext;
@@ -67,14 +74,22 @@ export default function BeatCanvas({
       }
       const audioCtx = audioCtxRef.current!;
       if (!sourceRef.current) {
-        sourceRef.current = audioCtx.createMediaElementSource(audio);
+        try {
+          sourceRef.current = audioCtx.createMediaElementSource(audio);
+        } catch (e) {
+          // cross-origin or already connected
+        }
       }
       if (!analyserRef.current) {
         analyserRef.current = audioCtx.createAnalyser();
         analyserRef.current.fftSize = 2048;
       }
-      sourceRef.current.connect(analyserRef.current);
-      analyserRef.current.connect(audioCtx.destination);
+      try {
+        sourceRef.current && sourceRef.current.connect(analyserRef.current as AnalyserNode);
+        analyserRef.current.connect(audioCtx.destination);
+      } catch (e) {
+        // ignoring double connect errors
+      }
 
       const bufferLength = analyserRef.current.frequencyBinCount;
       dataArrayRef.current = new Uint8Array(bufferLength);
@@ -82,7 +97,6 @@ export default function BeatCanvas({
       setIsRunning(true);
     };
 
-    // If audio is already allowed to play, start, otherwise listen to first play
     if (audio.readyState >= 2 || !audio.paused) {
       startAudio().catch(() => {});
     } else {
@@ -94,11 +108,11 @@ export default function BeatCanvas({
     }
 
     return () => {
-      // leave audio context running — not closing to avoid re-creating frequently
+      // leave audio context running
     };
   }, [audioRef]);
 
-  // Canvas resize and DPR handling
+  // Canvas resize and DPR handling with adaptive downscale
   useEffect(() => {
     const canvas = canvasRef.current!;
     if (!canvas) return;
@@ -107,38 +121,58 @@ export default function BeatCanvas({
     ctxRef.current = ctx;
 
     const resize = () => {
-      const parent = canvas.parentElement;
-      const dpr = window.devicePixelRatio || 1;
-      const w =
+      const parent = (containerRef && containerRef.current) || canvas.parentElement;
+      let w =
         width === "auto"
           ? (parent?.clientWidth ?? 600)
           : (width as number | undefined) ?? parent?.clientWidth ?? 600;
-      const h =
+      let h =
         height === "auto"
           ? (parent?.clientHeight ?? 200)
           : (height as number | undefined);
 
+      // adaptive downscale for performance on mobile / high DPR
+      let effectiveDpr = dpr;
+      if (deviceIsMobile) effectiveDpr = Math.min(effectiveDpr, 1);
+      if (w < 600) effectiveDpr *= 0.9; // slight downscaling
+
       canvas.style.width = `${w}px`;
       canvas.style.height = `${h}px`;
-      canvas.width = Math.max(1, Math.floor(w * dpr));
-      canvas.height = Math.max(1, Math.floor(h * dpr));
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // normalize drawing to CSS pixels
+      canvas.width = Math.max(1, Math.floor(w * effectiveDpr));
+      canvas.height = Math.max(1, Math.floor(h * effectiveDpr));
+      ctx.setTransform(effectiveDpr, 0, 0, effectiveDpr, 0, 0);
     };
 
     resize();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, [width, height]);
+  }, [width, height, containerRef]);
 
-  // Main draw loop
+  // Pause rendering when hidden
   useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) {
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      } else {
+        // resume
+        if (!rafRef.current) {
+          rafRef.current = requestAnimationFrame(drawLoop);
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
+  // main draw loop function needs to be defined before used in visibility effect
+  const drawLoop = () => {
     const canvas = canvasRef.current;
     const ctx = ctxRef.current;
     if (!canvas || !ctx) return;
 
     const analyser = analyserRef.current;
     if (!analyser) {
-      // clear canvas with nice background until audio starts
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       drawIdleBackground(ctx, canvas, palette);
       return;
@@ -148,7 +182,6 @@ export default function BeatCanvas({
     const waveData = waveformArrayRef.current!;
     const bufferLength = analyser.frequencyBinCount;
 
-    // helpers
     const getAvg = (arr: Uint8Array, start = 0, end = arr.length) => {
       let s = 0;
       for (let i = start; i < end; i++) s += arr[i];
@@ -157,7 +190,9 @@ export default function BeatCanvas({
 
     const spawnParticles = (count: number, x: number, y: number) => {
       const pArr = particlesRef.current;
+      const cap = deviceIsMobile ? 300 : 900;
       for (let i = 0; i < count; i++) {
+        if (pArr.length > cap) break;
         const angle = Math.random() * Math.PI * 2;
         const speed = Math.random() * 3 + 1;
         const size = Math.random() * 3 + 2;
@@ -174,69 +209,76 @@ export default function BeatCanvas({
           color,
         });
       }
-      // cap total
-      if (pArr.length > 1000) {
-        pArr.splice(0, pArr.length - 800);
-      }
     };
 
     const draw = () => {
       if (!analyserRef.current) return;
-
       analyserRef.current.getByteFrequencyData(freqData);
       analyserRef.current.getByteTimeDomainData(waveData);
 
       const w = canvas.width / (window.devicePixelRatio || 1);
       const h = canvas.height / (window.devicePixelRatio || 1);
 
-      // subtle background fade (gives motion trail)
-      ctx.fillStyle = "rgba(6,6,12,0.25)";
+      ctx.fillStyle = "rgba(6,6,12,0.18)";
       ctx.fillRect(0, 0, w, h);
 
-      // nice radial gradient background
+      // subtle animated gradient
       const grad = ctx.createLinearGradient(0, 0, w, h);
-      grad.addColorStop(
-        0,
-        mixColors(
-          palette[0],
-          palette[1],
-          Math.sin(Date.now() / 5000) * 0.5 + 0.5
-        )
-      );
+      grad.addColorStop(0, mixColors(palette[0], palette[1], Math.sin(Date.now() / 6000) * 0.5 + 0.5));
       grad.addColorStop(1, mixColors(palette[2], palette[3], 0.4));
-      ctx.globalCompositeOperation = "source-over";
-      ctx.globalAlpha = 0.65;
+      ctx.globalAlpha = 0.75;
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, w, h);
       ctx.globalAlpha = 1;
 
-      // compute bass energy for beat detection
       const bass = getAvg(freqData, 0, Math.floor(bufferLength * 0.08));
-      const mid = getAvg(
-        freqData,
-        Math.floor(bufferLength * 0.08),
-        Math.floor(bufferLength * 0.5)
-      );
+      const mid = getAvg(freqData, Math.floor(bufferLength * 0.08), Math.floor(bufferLength * 0.5));
 
-      // draw bars
-      const barW = w / barCount;
-      for (let i = 0; i < barCount; i++) {
-        const index = Math.floor((i / barCount) * bufferLength);
-        const value = freqData[index] / 255; // 0..1
-        const barH = Math.max(2, value * h * 0.9 * sensitivity);
-        const x = i * barW + barW * 0.15;
-        const y = h - barH;
+      if (visualMode === "bars" || visualMode === "nebula") {
+        const barW = w / barCount;
+        for (let i = 0; i < barCount; i++) {
+          const index = Math.floor((i / barCount) * bufferLength);
+          const value = freqData[index] / 255; // 0..1
+          const barH = Math.max(2, value * h * 0.9 * sensitivity);
+          const x = i * barW + barW * 0.15;
+          const y = h - barH;
 
-        // color cycling
-        const cA = palette[i % palette.length];
-        const cB = palette[(i + 2) % palette.length];
-        const col = mixColors(cA, cB, value);
-        // glow effect
-        ctx.fillStyle = col;
+          const cA = palette[i % palette.length];
+          const cB = palette[(i + 2) % palette.length];
+          const col = mixColors(cA, cB, value);
+          ctx.fillStyle = col;
+          ctx.save();
+          ctx.shadowColor = col;
+          ctx.shadowBlur = 12 * (0.5 + value);
+          ctx.fillRect(x, y, barW * 0.7, barH);
+          ctx.restore();
+        }
+      }
+
+      // ring mode: FFT ring around center
+      if (visualMode === "ring") {
+        const cx = w / 2;
+        const cy = h / 2;
+        const radius = Math.min(w, h) * 0.28;
+        const rings = 120;
         ctx.save();
-        ctx.shadowColor = col;
-        ctx.shadowBlur = 12 * (0.5 + value);
-        ctx.fillRect(x, y, barW * 0.7, barH);
+        ctx.translate(cx, cy);
+        for (let i = 0; i < rings; i++) {
+          const angle = (i / rings) * Math.PI * 2;
+          const idx = Math.floor((i / rings) * bufferLength);
+          const mag = (freqData[idx] / 255) * 1.8;
+          const x1 = Math.cos(angle) * radius;
+          const y1 = Math.sin(angle) * radius;
+          const x2 = Math.cos(angle) * (radius + mag * 80);
+          const y2 = Math.sin(angle) * (radius + mag * 80);
+          const col = mixColors(palette[i % palette.length], palette[(i + 2) % palette.length], mag);
+          ctx.strokeStyle = col;
+          ctx.lineWidth = Math.max(1, mag * 3);
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+        }
         ctx.restore();
       }
 
@@ -250,17 +292,16 @@ export default function BeatCanvas({
           const v = waveData[i] / 128.0; // approx -1..1
           const yv = (v * h) / 2;
           const x = i * slice;
-          if (i === 0) ctx.moveTo(x, y / 2 + yv);
-          else ctx.lineTo(x, y / 2 + yv);
+          if (i === 0) ctx.moveTo(x, h / 2 + yv);
+          else ctx.lineTo(x, h / 2 + yv);
         }
         ctx.stroke();
       }
 
-      // star-like center halo pulse based on mid energy
+      // center halo pulse
       const centerX = w * 0.5;
       const centerY = h * 0.5;
       const pulse = Math.min(1, mid / 150) * (1 + Math.sin(Date.now() / 250) * 0.1);
-      ctx.beginPath();
       const radius = 30 + pulse * 140;
       const halo = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
       halo.addColorStop(0, hexToRgba(palette[1], 0.28));
@@ -271,13 +312,11 @@ export default function BeatCanvas({
       ctx.fillRect(centerX - radius, centerY - radius, radius * 2, radius * 2);
       ctx.globalCompositeOperation = "source-over";
 
-      // beat detection: if bass spikes, spawn particles
       const now = performance.now();
-      const bassThreshold = 160 * (0.9 / sensitivity); // tweak
+      const bassThreshold = 160 * (0.95 / sensitivity);
       if (bass > bassThreshold && now - lastBeatRef.current > 120) {
         lastBeatRef.current = now;
-        const spawnCount = Math.floor(6 + particleIntensity * 30);
-        // spawn around center with random offset
+        const spawnCount = Math.floor(4 + particleIntensity * 28);
         for (let i = 0; i < spawnCount; i++) {
           const tx = centerX + (Math.random() - 0.5) * 200;
           const ty = centerY + (Math.random() - 0.5) * 120;
@@ -285,14 +324,13 @@ export default function BeatCanvas({
         }
       }
 
-      // update and draw particles
+      // particles
       const parts = particlesRef.current;
       for (let i = parts.length - 1; i >= 0; i--) {
         const p = parts[i];
-        // physics
         p.vx *= 0.99;
         p.vy *= 0.99;
-        p.vy += 0.03; // gravity
+        p.vy += 0.03;
         p.x += p.vx;
         p.y += p.vy;
         p.life -= 1;
@@ -309,42 +347,36 @@ export default function BeatCanvas({
         if (p.life <= 0) parts.splice(i, 1);
       }
 
-      // subtle vignette and overlay lines
       drawOverlay(ctx, w, h, palette);
-
       rafRef.current = requestAnimationFrame(draw);
     };
 
     // Start loop
     if (rafRef.current == null) rafRef.current = requestAnimationFrame(draw);
+  };
 
+  // mount/unmount loop
+  useEffect(() => {
+    drawLoop();
     return () => {
-      if (rafRef.current != null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
     };
-  }, [
-    isRunning,
-    barCount,
-    sensitivity,
-    showWaveform,
-    particleIntensity,
-    palette,
-  ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning, barCount, sensitivity, showWaveform, particleIntensity, palette, visualMode]);
 
-  // cleanup on unmount
+  // cleanup
   useEffect(() => {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (audioCtxRef.current) {
-        // do NOT close audioCtx to keep playback stable across remounts; let GC handle it
+        // don't close to avoid recreating repeatedly
       }
     };
   }, []);
 
   return (
-    <div className={`beat-canvas-root ${className ?? ""}`}>
+    <div className={`beat-canvas-root ${className ?? ""}`} ref={containerRef}>
       <canvas ref={canvasRef} className="beat-canvas-element" />
       <div className="beat-canvas-ghost">
         <div className="beat-canvas-title">Beat Canvas</div>
@@ -368,7 +400,6 @@ function drawIdleBackground(
   grad.addColorStop(1, hexToRgba(palette[2], 0.06));
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, w, h);
-  // faint centre glow
   const halo = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.min(w, h));
   halo.addColorStop(0, hexToRgba(palette[1], 0.12));
   halo.addColorStop(1, "rgba(0,0,0,0)");
@@ -382,7 +413,6 @@ function drawOverlay(
   h: number,
   palette: string[]
 ) {
-  // soft vignette
   ctx.save();
   const vignette = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) / 4, w / 2, h / 2, Math.max(w, h));
   vignette.addColorStop(0, "rgba(0,0,0,0)");
@@ -391,7 +421,6 @@ function drawOverlay(
   ctx.fillRect(0, 0, w, h);
   ctx.restore();
 
-  // diagonal streaks
   ctx.save();
   ctx.globalAlpha = 0.06;
   ctx.strokeStyle = palette[5] ?? "#fff";
@@ -408,7 +437,6 @@ function drawOverlay(
 /* ---------- Color helpers ---------- */
 
 function mixColors(a: string, b: string, t: number) {
-  // naive hex/RGB parse for typical #RRGGBB or CSS color fallback via canvas
   const ca = parseRgb(a);
   const cb = parseRgb(b);
   const r = Math.round(ca.r + (cb.r - ca.r) * t);
@@ -420,13 +448,11 @@ function mixColors(a: string, b: string, t: number) {
 function parseRgb(color: string) {
   const ctx = document.createElement("canvas").getContext("2d")!;
   ctx.fillStyle = color;
-  const computed = ctx.fillStyle; // standardized rgb(...) or #rrggbb
-  // handle rgb(a)
+  const computed = ctx.fillStyle;
   const m = computed.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
   if (m) {
     return { r: parseInt(m[1]), g: parseInt(m[2]), b: parseInt(m[3]) };
   }
-  // hex fallback
   let hex = computed.replace("#", "");
   if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
   const r = parseInt(hex.substring(0, 2), 16);
