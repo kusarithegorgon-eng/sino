@@ -2,7 +2,14 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 
-const rootEl = document.getElementById("root");
+// Create a #root element automatically if it's missing (helps server-side templates)
+let rootEl = document.getElementById("root");
+if (!rootEl) {
+  rootEl = document.createElement("div");
+  rootEl.id = "root";
+  document.body.appendChild(rootEl);
+}
+
 if (rootEl) {
   const root = createRoot(rootEl);
   root.render(
@@ -11,5 +18,5 @@ if (rootEl) {
     </React.StrictMode>
   );
 } else {
-  console.warn("No #root element found to mount the app.");
+  console.warn("Failed to create root element for app mount.");
 }
