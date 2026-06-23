@@ -10,6 +10,8 @@ type UseAudioAnalyzerReturn = {
   isPlaying: boolean;
   currentFileName: string | null;
   executionDuration: number;
+  duration: number;
+  progress: number;
   frequencyDataRef: React.MutableRefObject<Uint8Array | null>;
   updateFrequencyData: () => Uint8Array | null;
   mediaRef: React.MutableRefObject<HTMLMediaElement | null>;
@@ -29,6 +31,7 @@ export default function useAudioAnalyzer(initialSource?: FileOrUrl): UseAudioAna
     typeof initialSource === "string" ? initialSource : initialSource instanceof File ? initialSource.name : null
   );
   const [executionDuration, setExecutionDuration] = useState(0);
+  const [duration, setDuration] = useState(0);
 
   const createMediaElement = useCallback((type: "audio" | "video") => {
     if (mediaRef.current && mediaTypeRef.current === type) return mediaRef.current;
@@ -110,10 +113,15 @@ export default function useAudioAnalyzer(initialSource?: FileOrUrl): UseAudioAna
     const handleTimeUpdate = () => {
       if (mediaRef.current) setExecutionDuration(mediaRef.current.currentTime || 0);
     };
+    const handleLoadedMetadata = () => {
+      if (mediaRef.current) setDuration(mediaRef.current.duration || 0);
+    };
     media.addEventListener("timeupdate", handleTimeUpdate);
+    media.addEventListener("loadedmetadata", handleLoadedMetadata);
 
     const cleanup = () => {
       media.removeEventListener("timeupdate", handleTimeUpdate);
+      media.removeEventListener("loadedmetadata", handleLoadedMetadata);
     };
 
     (media as any).__useAudioAnalyzerCleanup = cleanup;
@@ -224,6 +232,8 @@ export default function useAudioAnalyzer(initialSource?: FileOrUrl): UseAudioAna
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const progressValue = duration > 0 ? executionDuration / duration : 0;
+
   return {
     loadSource,
     play,
@@ -232,6 +242,8 @@ export default function useAudioAnalyzer(initialSource?: FileOrUrl): UseAudioAna
     isPlaying,
     currentFileName,
     executionDuration,
+    duration,
+    progress: progressValue,
     frequencyDataRef,
     updateFrequencyData,
     mediaRef,

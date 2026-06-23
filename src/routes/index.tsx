@@ -74,7 +74,7 @@ function Index() {
   const [palette, setPalette] = useState(0);
 
   // Audio analyzer hook
-  const { loadSource, play, pause, isPlaying, updateFrequencyData } = useAudioAnalyzer();
+  const { loadSource, play, pause, isPlaying, updateFrequencyData, progress } = useAudioAnalyzer();
 
   // Real-time frequency data passed to VisualCanvas
   const [freqData, setFreqData] = useState<Uint8Array>(() => new Uint8Array(256));
@@ -236,7 +236,7 @@ function Index() {
 
           <div className="relative flex-1 rounded-2xl border border-border bg-black overflow-hidden shadow-[0_0_60px_-20px_var(--neon)]">
             <div className="block h-full w-full">
-              <VisualCanvas frequencyData={freqData} bassIntensity={bass} />
+              <VisualCanvas frequencyData={freqData} bassIntensity={bass} progress={progress} />
             </div>
             <div className="absolute bottom-4 right-4 flex items-center gap-2 rounded-full border border-neon/40 bg-black/60 px-3 py-1.5 backdrop-blur">
               <span className="h-2 w-2 rounded-full bg-neon shadow-[0_0_8px_var(--neon)]" />

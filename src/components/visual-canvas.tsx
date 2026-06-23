@@ -4,14 +4,16 @@ import * as THREE from "three";
 interface VisualCanvasProps {
   frequencyData: Uint8Array;
   bassIntensity: number;
+  progress?: number; // 0-1 song position
 }
 
-const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensity }) => {
+const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensity, progress = 0 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const flashRef = useRef<HTMLDivElement | null>(null);
   const frameIdRef = useRef<number | null>(null);
   const freqRef = useRef<Uint8Array>(frequencyData);
   const bassRef = useRef<number>(bassIntensity);
+  const progressRef = useRef<number>(progress);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
   useEffect(() => {
@@ -21,6 +23,10 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
   useEffect(() => {
     bassRef.current = bassIntensity;
   }, [bassIntensity]);
+
+  useEffect(() => {
+    progressRef.current = progress;
+  }, [progress]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -73,7 +79,6 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
     starGeo.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
     starGeo.setAttribute("size", new THREE.BufferAttribute(starSizes, 1));
 
-    // Use a simple circle texture for stars
     const starCanvas = document.createElement("canvas");
     starCanvas.width = 32; starCanvas.height = 32;
     const sc = starCanvas.getContext("2d")!;
@@ -100,7 +105,6 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
     // ─── MAIN SPHERE (deformable) ──────────────────────────────────
     const sphereDetail = 5;
     const mainSphereGeometry = new THREE.IcosahedronGeometry(0.85, sphereDetail);
-    // Store original positions for deformation
     const origPositions = mainSphereGeometry.attributes.position.array.slice() as Float32Array;
     const vertCount = mainSphereGeometry.attributes.position.count;
 
@@ -116,6 +120,17 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
     const mainSphere = new THREE.Mesh(mainSphereGeometry, mainSphereMaterial);
     scene.add(mainSphere);
 
+    // ─── GHOST SPHERE (chromatic trail / afterimage) ───────────────
+    const ghostSphereGeometry = new THREE.IcosahedronGeometry(0.88, 4);
+    const ghostSphereMaterial = new THREE.MeshBasicMaterial({
+      color: 0x00f7ff,
+      transparent: true,
+      opacity: 0,
+      wireframe: true,
+    });
+    const ghostSphere = new THREE.Mesh(ghostSphereGeometry, ghostSphereMaterial);
+    scene.add(ghostSphere);
+
     // ─── WIREFRAME SHELL ──────────────────────────────────────────
     const wireframeGeometry = new THREE.WireframeGeometry(new THREE.IcosahedronGeometry(0.92, 4));
     const wireframeMaterial = new THREE.LineBasicMaterial({
@@ -126,23 +141,40 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
     const wireframe = new THREE.LineSegments(wireframeGeometry, wireframeMaterial);
     scene.add(wireframe);
 
-    // ─── FREQUENCY BAR RING ───────────────────────────────────────
+    // ─── WAVEFORM ARC (oscilloscope curve behind sphere) ──────────
+    const WAVE_POINTS = 256;
+    const wavePositions = new Float32Array(WAVE_POINTS * 3);
+    const waveGeometry = new THREE.BufferGeometry();
+    waveGeometry.setAttribute("position", new THREE.BufferAttribute(wavePositions, 3));
+    const waveMaterial = new THREE.LineBasicMaterial({
+      color: 0x00ffcc,
+      transparent: true,
+      opacity: 0.7,
+      linewidth: 2,
+    });
+    const waveLine = new THREE.Line(waveGeometry, waveMaterial);
+    waveLine.position.z = -0.5; // behind sphere
+    waveLine.scale.set(1.8, 1.2, 1);
+    scene.add(waveLine);
+
+    // ─── FREQUENCY BAR RING (tilted 15° off horizontal) ───────────
     const BAR_COUNT = 128;
     const barMeshes: THREE.Mesh[] = [];
     const barRingRadius = 1.5;
+    const barRingGroup = new THREE.Group();
+    barRingGroup.rotation.x = Math.PI / 2 - Math.PI / 12; // ~15° tilt
+    scene.add(barRingGroup);
 
     for (let i = 0; i < BAR_COUNT; i++) {
       const angle = (i / BAR_COUNT) * Math.PI * 2;
       const geo = new THREE.CylinderGeometry(0.012, 0.018, 1, 4);
-      // Shift geometry so it grows outward from the base
       geo.translate(0, 0.5, 0);
 
-      // Gradient color: cyan on low freqs → magenta → yellow on highs
       const t = i / BAR_COUNT;
       const color = new THREE.Color();
-      if (t < 0.33) color.setHSL(0.5 + t * 0.2, 1.0, 0.55);        // cyan → blue
-      else if (t < 0.66) color.setHSL(0.7 + (t - 0.33) * 0.6, 1.0, 0.55); // blue → magenta
-      else color.setHSL(0.0 + (t - 0.66) * 0.5, 1.0, 0.55);         // magenta → red/yellow
+      if (t < 0.33) color.setHSL(0.5 + t * 0.2, 1.0, 0.55);
+      else if (t < 0.66) color.setHSL(0.7 + (t - 0.33) * 0.6, 1.0, 0.55);
+      else color.setHSL(0.0 + (t - 0.66) * 0.5, 1.0, 0.55);
 
       const mat = new THREE.MeshStandardMaterial({
         color,
@@ -155,11 +187,11 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
 
       bar.position.x = Math.cos(angle) * barRingRadius;
       bar.position.z = Math.sin(angle) * barRingRadius;
-      bar.rotation.z = -Math.PI / 2; // point radially outward
+      bar.rotation.z = -Math.PI / 2;
       bar.rotation.y = -angle;
 
       barMeshes.push(bar);
-      scene.add(bar);
+      barRingGroup.add(bar);
     }
 
     // ─── RINGS ────────────────────────────────────────────────────
@@ -189,10 +221,43 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
     ring3.rotation.y = Math.PI / 2.2;
     scene.add(ring3);
 
-    // Thin fast outer ring
     const ring4 = createRing(2.3, 0xff6600, 0.3, 0.006);
     ring4.rotation.x = Math.PI / 5;
     scene.add(ring4);
+
+    // ─── PROGRESS RING (outer arc that fills clockwise) ───────────
+    const progressRingRadius = 2.6;
+    const PROGRESS_SEGMENTS = 128;
+    const progressPositions = new Float32Array(PROGRESS_SEGMENTS * 3);
+    const progressGeometry = new THREE.BufferGeometry();
+    progressGeometry.setAttribute("position", new THREE.BufferAttribute(progressPositions, 3));
+    const progressMaterial = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.6,
+    });
+    const progressRing = new THREE.Line(progressGeometry, progressMaterial);
+    progressRing.rotation.x = Math.PI / 2;
+    scene.add(progressRing);
+
+    // Progress ring background (full circle dim)
+    const progressBgPositions = new Float32Array(65 * 3);
+    for (let i = 0; i <= 64; i++) {
+      const angle = (i / 64) * Math.PI * 2;
+      progressBgPositions[i * 3] = Math.cos(angle) * progressRingRadius;
+      progressBgPositions[i * 3 + 1] = 0;
+      progressBgPositions[i * 3 + 2] = Math.sin(angle) * progressRingRadius;
+    }
+    const progressBgGeo = new THREE.BufferGeometry();
+    progressBgGeo.setAttribute("position", new THREE.BufferAttribute(progressBgPositions, 3));
+    const progressBgMat = new THREE.LineBasicMaterial({
+      color: 0x333344,
+      transparent: true,
+      opacity: 0.4,
+    });
+    const progressBg = new THREE.Line(progressBgGeo, progressBgMat);
+    progressBg.rotation.x = Math.PI / 2;
+    scene.add(progressBg);
 
     // ─── CORE GLOW (billboard plane) ─────────────────────────────
     const glowCanvas = document.createElement("canvas");
@@ -230,7 +295,6 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
       pPositions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
       pPositions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
       pPositions[i * 3 + 2] = r * Math.cos(phi);
-      // Drift outward
       pVelocities[i * 3]     = pPositions[i * 3] * 0.002;
       pVelocities[i * 3 + 1] = pPositions[i * 3 + 1] * 0.002;
       pVelocities[i * 3 + 2] = pPositions[i * 3 + 2] * 0.002;
@@ -240,7 +304,7 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
 
     for (let i = 0; i < particleCount; i++) {
       resetParticle(i);
-      pLife[i] = Math.random() * pMaxLife[i]; // stagger initial life
+      pLife[i] = Math.random() * pMaxLife[i];
     }
 
     const particlesGeo = new THREE.BufferGeometry();
@@ -284,8 +348,9 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
     let elapsed = 0;
     let lastBass = 0;
     let flashAlpha = 0;
-    // Beat detection state
+    let ghostAlpha = 0;
     let beatCooldown = 0;
+    let hueOffset = 0;
 
     const animate = () => {
       const freq = freqRef.current;
@@ -320,11 +385,12 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
       const normHigh = high / 255;
       const normPres = presence / 255;
 
-      // Beat detection: sudden bass spike
+      // Beat detection
       const beatThreshold = 0.35;
       const isBeat = normBass > beatThreshold && normBass > lastBass * 1.3 && beatCooldown <= 0;
       if (isBeat) {
         flashAlpha = 0.18 + normBass * 0.25;
+        ghostAlpha = 0.4 + normBass * 0.3; // trigger ghost afterimage
         beatCooldown = 12;
       }
       if (beatCooldown > 0) beatCooldown--;
@@ -336,9 +402,24 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
         flashEl.style.opacity = String(Math.max(0, flashAlpha));
       }
 
+      // Ghost sphere fade
+      ghostAlpha *= 0.92;
+      ghostSphereMaterial.opacity = ghostAlpha;
+      ghostSphere.rotation.x = mainSphere.rotation.x;
+      ghostSphere.rotation.y = mainSphere.rotation.y;
+      ghostSphere.scale.setScalar(1 + (0.4 - ghostAlpha) * 0.5);
+
+      // Time-based hue shift for visual chapters
+      const t = elapsed * 0.001;
+      hueOffset = (hueOffset + 0.0003) % 1;
+
+      // Update sphere color with hue shift
+      const baseHue = 0.52 + hueOffset * 0.3; // cyan slowly shifting
+      mainSphereMaterial.color.setHSL(baseHue, 0.9, 0.5);
+      mainSphereMaterial.emissive.setHSL(baseHue - 0.1, 0.8, 0.2);
+
       // ── Sphere vertex deformation ──────────────────────────────
       const pos = mainSphereGeometry.attributes.position as THREE.BufferAttribute;
-      const t = elapsed * 0.001;
       const deformScale = 0.08 + normBass * bI * 0.35 + normMid * 0.12;
       for (let i = 0; i < vertCount; i++) {
         const ox = origPositions[i * 3];
@@ -346,7 +427,6 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
         const oz = origPositions[i * 3 + 2];
         const len3 = Math.sqrt(ox * ox + oy * oy + oz * oz);
         const nx = ox / len3, ny = oy / len3, nz = oz / len3;
-        // Noise: use sine combination as cheap noise
         const n =
           Math.sin(nx * 4.2 + t * 1.1) * Math.cos(ny * 3.7 + t * 0.9) +
           Math.cos(nz * 5.1 - t * 1.3) * Math.sin(nx * 2.8 + t * 0.7) * 0.5;
@@ -360,6 +440,28 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
       mainSphere.rotation.y += 0.003 + normMid  * 0.005;
       mainSphereMaterial.emissiveIntensity = 1.0 + normBass * bI * 2.0;
 
+      // ── Waveform arc update ─────────────────────────────────────
+      const wavePos = waveGeometry.attributes.position as THREE.BufferAttribute;
+      const waveTimeData = freqRef.current;
+      for (let i = 0; i < WAVE_POINTS; i++) {
+        const x = (i / WAVE_POINTS - 0.5) * 2; // -1 to 1
+        let y = 0;
+        if (waveTimeData && waveTimeData.length > 0) {
+          // Map frequency bins to amplitude for visual waveform
+          const bin = Math.floor((i / WAVE_POINTS) * Math.min(waveTimeData.length, 256));
+          y = ((waveTimeData[bin] / 255) - 0.5) * 0.8;
+        }
+        // Add sinusoidal base for visual interest when no audio
+        y += Math.sin(i * 0.1 + t * 3) * 0.05;
+        wavePositions[i * 3] = x;
+        wavePositions[i * 3 + 1] = y;
+        wavePositions[i * 3 + 2] = 0;
+      }
+      wavePos.needsUpdate = true;
+      waveMaterial.opacity = 0.4 + normBass * 0.4;
+      // Rotate waveform hue slightly
+      waveMaterial.color.setHSL(0.45 + hueOffset * 0.2, 0.9, 0.6);
+
       // ── Wireframe ────────────────────────────────────────────────
       wireframe.rotation.y += 0.006 + normMid * 0.004;
       wireframe.rotation.x += 0.002;
@@ -367,34 +469,72 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
       wireframe.scale.setScalar(1.0 + normBass * 0.06);
       (wireframeMaterial as THREE.LineBasicMaterial).opacity = 0.3 + normBass * 0.45;
 
-      // ── Frequency bars ───────────────────────────────────────────
+      // ── Frequency bars (with scale cap) ──────────────────────────
       const freq2 = freqRef.current;
+      const MAX_BAR_SCALE = 1.2; // hard cap to prevent blowout
       for (let i = 0; i < BAR_COUNT; i++) {
         const freqVal = freq2 && freq2.length > 0
           ? freq2[Math.floor((i / BAR_COUNT) * freq2.length)] / 255
           : 0;
-        const targetScale = 0.08 + freqVal * 2.2 + (i < BAR_COUNT * 0.15 ? normBass * bI * 1.5 : 0);
+        // Clamp the target scale
+        const targetScale = Math.min(MAX_BAR_SCALE, 0.08 + freqVal * 1.5 + (i < BAR_COUNT * 0.15 ? normBass * bI * 0.8 : 0));
         barMeshes[i].scale.y += (targetScale - barMeshes[i].scale.y) * 0.25;
         const mat = barMeshes[i].material as THREE.MeshStandardMaterial;
         mat.emissiveIntensity = 0.4 + freqVal * 2.5;
+        // Shift bar colors with hue offset
+        const barHue = (i / BAR_COUNT + hueOffset) % 1;
+        mat.color.setHSL(barHue, 1.0, 0.55);
+        mat.emissive.setHSL(barHue, 1.0, 0.35);
       }
 
-      // ── Rings ────────────────────────────────────────────────────
+      // ── Progress ring update ────────────────────────────────────
+      const prog = progressRef.current;
+      const progPos = progressGeometry.attributes.position as THREE.BufferAttribute;
+      const activeSegments = Math.floor(prog * PROGRESS_SEGMENTS);
+      for (let i = 0; i < PROGRESS_SEGMENTS; i++) {
+        const angle = (i / PROGRESS_SEGMENTS) * Math.PI * 2 - Math.PI / 2; // start at top
+        if (i <= activeSegments) {
+          progressPositions[i * 3] = Math.cos(angle) * progressRingRadius;
+          progressPositions[i * 3 + 1] = 0;
+          progressPositions[i * 3 + 2] = Math.sin(angle) * progressRingRadius;
+        } else {
+          // hide inactive segments
+          progressPositions[i * 3] = 0;
+          progressPositions[i * 3 + 1] = 0;
+          progressPositions[i * 3 + 2] = 0;
+        }
+      }
+      progPos.needsUpdate = true;
+      progressMaterial.color.setHSL(hueOffset, 0.3, 0.85);
+
+      // ── Rings with hue-reactive colors ──────────────────────────
+      const ring1Hue = (0.48 + hueOffset) % 1;
       ring1.rotation.x += 0.007 + normBass * 0.012;
       ring1.scale.setScalar(1 + normBass * bI * 0.22);
+      (ring1.material as THREE.MeshStandardMaterial).color.setHSL(ring1Hue, 0.9, 0.55);
+      (ring1.material as THREE.MeshStandardMaterial).emissive.setHSL(ring1Hue, 0.9, 0.35);
       (ring1.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.6 + normBass * 1.5;
 
+      const ring2Hue = (0.83 + hueOffset) % 1;
       ring2.rotation.z += 0.005 + normMid * 0.008;
       ring2.scale.setScalar(1 + normMid * 0.18);
+      (ring2.material as THREE.MeshStandardMaterial).color.setHSL(ring2Hue, 0.9, 0.55);
+      (ring2.material as THREE.MeshStandardMaterial).emissive.setHSL(ring2Hue, 0.9, 0.35);
       (ring2.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.5 + normMid * 1.2;
 
+      const ring3Hue = (0.35 + hueOffset) % 1;
       ring3.rotation.y += 0.004 + normPres * 0.006;
       ring3.scale.setScalar(1 + normPres * 0.14);
+      (ring3.material as THREE.MeshStandardMaterial).color.setHSL(ring3Hue, 0.9, 0.55);
+      (ring3.material as THREE.MeshStandardMaterial).emissive.setHSL(ring3Hue, 0.9, 0.35);
       (ring3.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.4 + normPres * 1.0;
 
+      const ring4Hue = (0.08 + hueOffset) % 1;
       ring4.rotation.x += 0.01 + normHigh * 0.01;
       ring4.rotation.z += 0.008;
       ring4.scale.setScalar(1 + normHigh * 0.1);
+      (ring4.material as THREE.MeshStandardMaterial).color.setHSL(ring4Hue, 0.9, 0.55);
+      (ring4.material as THREE.MeshStandardMaterial).emissive.setHSL(ring4Hue, 0.9, 0.35);
       (ring4.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.3 + normHigh * 0.8;
 
       // ── Core glow ────────────────────────────────────────────────
@@ -403,10 +543,21 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
       const glowScale = 1.0 + normBass * bI * 1.2 + Math.sin(t * 2.1) * 0.05;
       glowPlane.scale.setScalar(glowScale);
 
-      // ── Lights ───────────────────────────────────────────────────
+      // ── Lights with hue-reactive colors ──────────────────────────
+      const coreHue = (0.52 + hueOffset) % 1;
+      coreLight.color.setHSL(coreHue, 1.0, 0.6);
       coreLight.intensity   = 3.0 + normBass * bI * 5.0;
+
+      const leftHue = (0.9 + hueOffset) % 1;
+      leftLight.color.setHSL(leftHue, 1.0, 0.55);
       leftLight.intensity   = 1.2 + normMid  * 2.0;
+
+      const rightHue = (0.38 + hueOffset) % 1;
+      rightLight.color.setHSL(rightHue, 1.0, 0.55);
       rightLight.intensity  = 0.8 + normPres * 1.5;
+
+      const rimHue = (0.7 + hueOffset) % 1;
+      rimLight.color.setHSL(rimHue, 1.0, 0.5);
       rimLight.intensity    = 0.8 + normHigh * 1.2;
 
       // ── Particles ────────────────────────────────────────────────
@@ -416,7 +567,6 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
         if (pLife[i] >= pMaxLife[i]) {
           resetParticle(i);
         }
-        const lifeFrac = pLife[i] / pMaxLife[i];
         const speedMult = 1 + normBass * bI * 4.0;
         pPositions[i * 3]     += pVelocities[i * 3]     * speedMult;
         pPositions[i * 3 + 1] += pVelocities[i * 3 + 1] * speedMult;
@@ -425,6 +575,8 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
       }
       pPosAttr.needsUpdate = true;
       particlesMat.opacity = 0.7 + normBass * 0.25;
+      const particleHue = (0.55 + hueOffset) % 1;
+      particlesMat.color.setHSL(particleHue, 0.8, 0.7);
       particles.rotation.y += 0.001 + normBass * 0.003;
 
       // Outer cloud
@@ -437,6 +589,8 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
       glowParticles.rotation.z += 0.002 + normHigh * 0.003;
       glowParticles.rotation.x += 0.001;
       glowPMat.opacity = 0.3 + normHigh * 0.35;
+      const cloudHue = (0.8 + hueOffset) % 1;
+      glowPMat.color.setHSL(cloudHue, 0.7, 0.5);
 
       // ── Stars: slow pulse ────────────────────────────────────────
       stars.rotation.y += 0.00015;
@@ -482,13 +636,15 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
 
       const disposables: THREE.BufferGeometry[] = [
         mainSphereGeometry, wireframeGeometry, particlesGeo, glowPGeo,
-        starGeo, glowPlaneGeo,
+        starGeo, glowPlaneGeo, waveGeometry, progressGeometry,
+        progressBgGeo, ghostSphereGeometry,
       ];
       disposables.forEach(g => { try { g.dispose(); } catch {} });
 
       const mats: THREE.Material[] = [
         mainSphereMaterial, wireframeMaterial, particlesMat, glowPMat,
-        starMat, glowPlaneMat,
+        starMat, glowPlaneMat, waveMaterial, progressMaterial,
+        progressBgMat, ghostSphereMaterial,
         ring1.material as THREE.Material,
         ring2.material as THREE.Material,
         ring3.material as THREE.Material,
@@ -500,7 +656,7 @@ const VisualCanvas: React.FC<VisualCanvasProps> = ({ frequencyData, bassIntensit
         try { (b.material as THREE.Material).dispose(); } catch {}
       });
 
-      [glowTex, starTex].forEach(t => { try { t.dispose(); } catch {} });
+      [glowTex, starTex].forEach(tex => { try { tex.dispose(); } catch {} });
 
       try { renderer.dispose(); } catch {}
       try {
