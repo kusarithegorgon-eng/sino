@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useRef, useEffect } from "react";
+import useAudioAnalyzer from "@/hooks/use-audio-analyzer";
+import VisualCanvas from "@/components/visual-canvas";
 import {
   Upload,
   Download,
@@ -66,85 +68,33 @@ const TECH = ["Web Audio API", "WebGL/Three.js", "TypeScript", "React Flow"];
 function Index() {
   const [fileName, setFileName] = useState<string | null>(null);
   const [style, setStyle] = useState<string>(STYLES[0]);
-  const [bass, setBass] = useState([72]);
-  const [treble, setTreble] = useState([54]);
-  const [energy, setEnergy] = useState([83]);
+  const [bass, setBass] = useState<number>(72);
+  const [treble, setTreble] = useState<number>(54);
+  const [energy, setEnergy] = useState<number>(83);
   const [palette, setPalette] = useState(0);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Lightweight aesthetic canvas animation (no Three.js dep needed)
+  // Audio analyzer hook
+  const { loadSource, play, pause, isPlaying, updateFrequencyData } = useAudioAnalyzer();
+
+  // Real-time frequency data passed to VisualCanvas
+  const [freqData, setFreqData] = useState<Uint8Array>(() => new Uint8Array(256));
+
+  // Note: the center visual is handled by Three.js in VisualCanvas
+
+  // frequency polling loop: update freqData at ~60fps
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
     let raf = 0;
-    const resize = () => {
-      const r = canvas.getBoundingClientRect();
-      canvas.width = r.width * devicePixelRatio;
-      canvas.height = r.height * devicePixelRatio;
-    };
-    resize();
-    const ro = new ResizeObserver(resize);
-    ro.observe(canvas);
-
-    const accent = PALETTES[palette].colors[0];
-    const deep = PALETTES[palette].colors[1];
-
-    const start = performance.now();
-    const render = (now: number) => {
-      const t = (now - start) / 1000;
-      const w = canvas.width;
-      const h = canvas.height;
-      ctx.clearRect(0, 0, w, h);
-
-      const grd = ctx.createRadialGradient(w / 2, h / 2, 10, w / 2, h / 2, Math.max(w, h) / 1.2);
-      grd.addColorStop(0, deep);
-      grd.addColorStop(1, "#04060a");
-      ctx.fillStyle = grd;
-      ctx.fillRect(0, 0, w, h);
-
-      const rings = 80;
-      const bassF = bass[0] / 100;
-      const trebF = treble[0] / 100;
-      const eF = energy[0] / 100;
-      for (let i = 0; i < rings; i++) {
-        const p = i / rings;
-        const radius =
-          (Math.min(w, h) / 2.4) *
-          (0.2 + p * 0.8 + Math.sin(t * (1 + trebF * 3) + i * 0.4) * 0.04 * eF);
-        ctx.beginPath();
-        ctx.arc(
-          w / 2 + Math.sin(t * 0.6 + i * 0.2) * 30 * bassF,
-          h / 2 + Math.cos(t * 0.5 + i * 0.15) * 30 * bassF,
-          radius,
-          0,
-          Math.PI * 2,
-        );
-        ctx.strokeStyle = accent + Math.floor(40 + p * 120).toString(16).padStart(2, "0");
-        ctx.lineWidth = 1 * devicePixelRatio;
-        ctx.stroke();
+    const loop = () => {
+      const arr = updateFrequencyData();
+      if (arr) {
+        // copy to trigger React updates
+        setFreqData(arr.slice());
       }
-
-      // particle burst
-      for (let i = 0; i < 60; i++) {
-        const a = (i / 60) * Math.PI * 2 + t * 0.3;
-        const r = (Math.min(w, h) / 3) * (0.6 + Math.sin(t * 2 + i) * 0.3 * eF);
-        ctx.beginPath();
-        ctx.arc(w / 2 + Math.cos(a) * r, h / 2 + Math.sin(a) * r, 2 * devicePixelRatio, 0, Math.PI * 2);
-        ctx.fillStyle = accent;
-        ctx.fill();
-      }
-
-      raf = requestAnimationFrame(render);
+      raf = requestAnimationFrame(loop);
     };
-    raf = requestAnimationFrame(render);
-    return () => {
-      cancelAnimationFrame(raf);
-      ro.disconnect();
-    };
-  }, [bass, treble, energy, palette, style]);
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [updateFrequencyData]);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -162,19 +112,57 @@ function Index() {
           </header>
 
           <Section title="1. Upload Your Audio">
-            <label className="block cursor-pointer rounded-xl border border-dashed border-border bg-[var(--panel-deep)] p-5 text-center hover:border-neon/60 transition-colors">
+            <label
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const f = e.dataTransfer?.files?.[0];
+                if (f) {
+                  setFileName(f.name);
+                  loadSource(f);
+                }
+              }}
+              className="block cursor-pointer rounded-xl border border-dashed border-border bg-[var(--panel-deep)] p-5 text-center hover:border-neon/60 transition-colors"
+            >
               <input
                 type="file"
-                accept="audio/mpeg,audio/mp3"
+                accept="audio/*,video/*"
                 className="hidden"
-                onChange={(e) => setFileName(e.target.files?.[0]?.name ?? null)}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) {
+                    setFileName(f.name);
+                    loadSource(f);
+                  }
+                }}
               />
               <Upload className="mx-auto h-6 w-6 text-neon" />
-              <p className="mt-2 text-sm font-medium">Drop MP3 here</p>
+              <p className="mt-2 text-sm font-medium">Drop audio or video here</p>
               <p className="mt-1 text-xs text-muted-foreground truncate">
                 {fileName ?? "midnight_drive_master_v3.mp3"}
               </p>
             </label>
+            <div className="mt-4 flex items-center justify-center gap-3">
+              <button
+                onClick={async () => {
+                  try {
+                    await play();
+                  } catch (err) {
+                    console.error(err);
+                  }
+                }}
+                className="inline-flex items-center justify-center rounded-full bg-neon px-4 py-2 text-xs font-semibold text-primary-foreground transition hover:brightness-110"
+              >
+                Play
+              </button>
+              <button
+                onClick={() => pause()}
+                className="inline-flex items-center justify-center rounded-full border border-border bg-transparent px-4 py-2 text-xs font-semibold text-foreground transition hover:border-neon/60"
+              >
+                Pause
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">{isPlaying ? "Playing now" : "Paused"}</p>
           </Section>
 
           <Section title="2. Select Visualization Style">
@@ -247,7 +235,9 @@ function Index() {
           </div>
 
           <div className="relative flex-1 rounded-2xl border border-border bg-black overflow-hidden shadow-[0_0_60px_-20px_var(--neon)]">
-            <canvas ref={canvasRef} className="block h-full w-full" />
+            <div className="block h-full w-full">
+              <VisualCanvas frequencyData={freqData} bassIntensity={bass} />
+            </div>
             <div className="absolute bottom-4 right-4 flex items-center gap-2 rounded-full border border-neon/40 bg-black/60 px-3 py-1.5 backdrop-blur">
               <span className="h-2 w-2 rounded-full bg-neon shadow-[0_0_8px_var(--neon)]" />
               <span className="text-xs font-medium text-neon">60 FPS (Stable)</span>
@@ -333,16 +323,24 @@ function SliderRow({
   onChange,
 }: {
   label: string;
-  value: number[];
-  onChange: (v: number[]) => void;
+  value: number;
+  onChange: (v: number) => void;
 }) {
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs text-foreground/80">{label}</span>
-        <span className="text-xs font-mono text-neon">{value[0]}</span>
+        <span className="text-xs font-mono text-neon">{value}</span>
       </div>
-      <Slider value={value} onValueChange={onChange} max={100} step={1} />
+      <Slider
+        value={[value]}
+        onValueChange={(v: any) => {
+          const next = Array.isArray(v) ? v[0] : v;
+          onChange(Number(next));
+        }}
+        max={100}
+        step={1}
+      />
     </div>
   );
 }
